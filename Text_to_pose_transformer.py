@@ -15,7 +15,16 @@ from collections import Counter
 import tqdm
 from torchtext.vocab import build_vocab_from_iterator
 from spacy.cli import download
-from helpers import get_seq_num_annotations
+
+def get_seq_num_annotations(file_path):
+
+    annotations = {}
+    with open(file_path, 'r') as f:
+        lines = f.readlines()
+        for line in lines[1:]:  # Skip the first line (header)
+            seq_num, text = line.split('_')  # can't remember the separators
+            annotations[int(seq_num)] = text.strip()
+    return annotations
 
 # Ensure Spacy's German model is downloaded
 spacy_de = spacy.load('de_core_news_sm')
