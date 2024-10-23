@@ -14,11 +14,44 @@ import evaluate
 from transformers import LongformerTokenizer, LongformerModel
 from transformers import LongformerForMaskedLM
 from scipy.spatial.distance import cosine
-
+from helpers import get_all_datasetwords
+from nltk.translate.meteor_score import single_meteor_score
+from nltk import download, word_tokenize
+from bleu import raw_corpus_bleu
 # Login to Hugging Face
 login(token="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")
 
 # Functions
+
+
+
+# Ensure necessary NLTK resources are downloaded
+download('wordnet')
+download('punkt')  # Required for word_tokenize
+
+
+def calculate_meteor(candidates, references):
+    """
+    Calculate the average METEOR score for a list of candidate sentences against a list of reference sentences.
+    
+    :param candidates: A list of strings representing candidate sentences.
+    :param references: A list of strings representing reference sentences.
+    :return: The average METEOR score.
+    """
+    assert len(candidates) == len(references), "The number of candidates and references must be the same."
+    
+    scores = []
+    for candidate, reference in zip(candidates, references):
+        # Tokenize the sentences
+        candidate_tokens = word_tokenize(candidate)
+        reference_tokens = word_tokenize(reference)
+        
+        # Calculate the METEOR score using tokenized sentences
+        score = single_meteor_score(reference_tokens, candidate_tokens)
+        scores.append(score)
+    
+    return sum(scores) / len(scores)
+
 
 def compute_rouge(predictions, references):
     scorer = rouge_scorer.RougeScorer(['rouge1', 'rouge2', 'rougeL'], use_stemmer=True)
@@ -96,6 +129,7 @@ def print_metrics(dataset, name, tokenizer, model, dataset_word_embeddings, all_
     max_input = 1024
     max_output_length = 1024
     total_count_bad = 0
+    total = 0
     with torch.no_grad():
         references, predictions, sentences = [], [], []
         for sample in dataset:
@@ -108,28 +142,67 @@ def print_metrics(dataset, name, tokenizer, model, dataset_word_embeddings, all_
             print(f"Reference: {sample['gloss']}")
             print(f"Generated text: {decoded_output}")
             total_count_bad += count_non_existing_words(decoded_output, all_glosses)
+            total += (len(decoded_output.split()))
             decoded_output = fix_output_glosses(decoded_output, model, tokenizer, dataset_word_embeddings, all_glosses, device)
             print(f"Fixed generated text: {decoded_output}")
             references.append(sample["gloss"])
             predictions.append(decoded_output)
             sentences.append(sample["text"])
-
-        metrics = compute_metrics(predictions, references)
-        print(f"{name} metrics: {metrics}")
-
+        # print("DONE")
+        # metrics = compute_metrics(predictions, references, True)
+        # print(f"{name} metrics: {metrics}")
+        # metrics = compute_metrics(predictions, references, False)
+        # print(f"{name} metrics without effective order: {metrics}")
+        results = raw_corpus_bleu(predictions, references)
+        print(f"{name} bleu score: {results.scores}")
         rouge_score = compute_rouge(predictions, references)
         print(f"{name} rouge score: {rouge_score}")
 
-        print(f"Total count of bad words: {total_count_bad}")
+        
+        #sort for bleu1 scores and print the worst 10
+    
+        # for i in range(4):
+            # bleu_i_scores = []
+            # for pred, ref, sentence in zip(predictions, references, sentences):
+            #     cur_metric = compute_single(pred, ref)
+            #     # add tuple of (bleu_i, pred, ref) to the list
+            #     bleu_i_scores.append((cur_metric['precisions'][i], pred, ref, sentence))
+
+            # # sort the list based on the bleu_i score
+            # bleu_i_scores.sort(key=lambda x: x[0])
+            # print(f"worst 10 bleu{i+1} scores:")
+
+            # for j in range(10):
+            #     print(f"bleu{i+1}: {bleu_i_scores[j][0]}")
+            #     print(f"sentence: {bleu_i_scores[j][3]}")
+            #     print(f"prediction: {bleu_i_scores[j][1]}")
+            #     print(f"reference: {bleu_i_scores[j][2]}")
+            #     print("")
+        
+
+
+        # print(f"Total count of bad words: {total_count_bad / total}")
 
 def postprocess_text(preds, labels):
     preds = [pred.strip() for pred in preds]
     labels = [[label.strip()] for label in labels]
     return preds, labels
 
-def compute_metrics(preds, labels):
+def compute_metrics(preds, labels, effective_order):
     decoded_preds = preds
     decoded_labels = labels
+    decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+    metric = evaluate.load("sacrebleu")
+    result = metric._compute(predictions=decoded_preds, references=decoded_labels, smooth_method="floor",
+        smooth_value=0,
+        force=True,
+        tokenize="none",
+        use_effective_order=effective_order)
+    return result
+
+def compute_single(preds, labels):
+    decoded_preds = [preds]
+    decoded_labels = [labels]
     decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
     metric = evaluate.load("sacrebleu")
     result = metric.compute(predictions=decoded_preds, references=decoded_labels)
@@ -149,9 +222,11 @@ def get_preprocessed_dataset(dataset):
     return dataset
 
 def get_all_glosses(file_path):
-    all_glosses = pd.read_csv(file_path, header=None, names=['gloss'])
-    all_glosses = all_glosses.dropna(subset=['gloss'])
-    glosses = all_glosses['gloss'].tolist()
+    all_lines = open(file_path).readlines()
+    glosses = []
+    for line in all_lines:
+        glosses.append(line.strip())
+    print(glosses)
     return glosses
 
 def get_datasets(file_path):
@@ -175,29 +250,28 @@ file_path = '/netscratch/abdelgawad/datasets/phoenix_data/text_to_pose/'
 # Load data
 train_dataset, dev_dataset, test_dataset = get_datasets(file_path)
 
-all_glosses = get_all_glosses("/netscratch/abdelgawad/datasets/phoenix_data/text_to_pose/all_glosses.csv")
+# Assume dataset_words is a list of words
+dataset_words = get_all_datasetwords()
 
-# Initialize the tokenizer
+# Load the BART tokenizer
 tokenizer = AutoTokenizer.from_pretrained("facebook/bart-base")
-print(f"tokenizer: {tokenizer}")
 
-train_dataset = get_preprocessed_dataset(train_dataset)
+all_glosses = get_all_glosses(file_path + 'all_glosses.csv')
+
+
 test_dataset = get_preprocessed_dataset(test_dataset)
 dev_dataset = get_preprocessed_dataset(dev_dataset)
+
 
 # Models file path
 models_path = "/netscratch/abdelgawad/trained-models/bart/"
 print(f"List of models: {os.listdir(models_path)}")
 
-batch_sizes = [64, 32, 64]
-all_num_epochs = [20, 20, 30]
 
-for i in range(len(batch_sizes)):
-    batch_size = batch_sizes[i]
-    num_epochs = all_num_epochs[i]
-    model_name = 'model'+"_epochs_" + str(num_epochs) + "_batch_size_" + str(batch_size)
+for model_name in os.listdir(models_path):
 
     model = AutoModelForMaskedLM.from_pretrained(models_path + model_name)
+    model.config.pad_token_id = tokenizer.pad_token_id
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model.to(device)
     
@@ -207,7 +281,7 @@ for i in range(len(batch_sizes)):
     print(f"Model: {model_name}")
     model.eval()
     
-    print_metrics(test_dataset, "test", tokenizer, model, dataset_word_embeddings, all_glosses, device)
+    print_metrics(test_dataset, "test", tokenizer, model, dataset_word_embeddings, all_glosses , device)
     print_metrics(dev_dataset, "dev", tokenizer, model, dataset_word_embeddings, all_glosses, device)
     
     print('-------------------------------------')
